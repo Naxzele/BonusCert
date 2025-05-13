@@ -1,6 +1,7 @@
 import numpy as np
 from numpy.fft import fft
 from scipy.interpolate import interp1d
+import pandas as pd
 
 # Characteristic function for Black-Scholes model
 def bs_characteristic_fn(u, S0, r, q, T, params):
@@ -97,23 +98,36 @@ class fft_price:
         call_prices = np.exp(-alpha * k[:, None]) / np.pi * fft_call  # shape (N, M)
 
         # Repeat for puts
-        phi_put = self.char_fn(v - (alpha - 1) * i)
-        denominator_put = (alpha**2 - alpha - v[:, None]**2 + i * (2 * alpha - 1) * v[:, None])
-        integrand_put = discount * phi_put / denominator_put * np.exp(i * v[:, None] * b) * eta * w
-        fft_put = np.real(fft(integrand_put, axis=0))
-        put_prices = np.exp(-alpha * k[:, None]) / np.pi * fft_put  # shape (N, M)
+        # phi_put = self.char_fn(v - (alpha - 1) * i)
+        # denominator_put = (alpha**2 - alpha - v[:, None]**2 + i * (2 * alpha - 1) * v[:, None])
+        # integrand_put = discount * phi_put / denominator_put * np.exp(i * v[:, None] * b) * eta * w
+        # fft_put = np.real(fft(integrand_put, axis=0))
+        # put_prices = np.exp(-alpha * k[:, None]) / np.pi * fft_put  # shape (N, M)
 
         if strike is not None:
             strike = np.asarray(strike)
             results_call = []
-            results_put = []
+            # results_put = []
 
             for m in range(call_prices.shape[1]):
                 call_interp = interp1d(K, call_prices[:, m], kind='cubic', fill_value="extrapolate")
-                put_interp = interp1d(K, put_prices[:, m], kind='cubic', fill_value="extrapolate")
+                # put_interp = interp1d(K, put_prices[:, m], kind='cubic', fill_value="extrapolate")
                 results_call.append(call_interp(strike))
-                results_put.append(put_interp(strike))
+                # results_put.append(put_interp(strike))
 
-            return np.stack(results_call, axis=-1), np.stack(results_put, axis=-1)  # Shape depends on strike
+            calls = np.stack(results_call, axis=-1)
+            # puts = np.stack(results_put, axis=-1)
+
+            result_df = pd.DataFrame({
+                'K': np.repeat(strike, calls.shape[1]),
+                'T': np.tile(self.T, calls.shape[0]),
+                'q': np.tile(self.q, calls.shape[0]) if self.q.shape[0]>1 else np.repeat(self.q, calls.shape[0]*calls.shape[1]),
+                'r': np.tile(self.r, calls.shape[0]) if self.r.shape[0]>1 else np.repeat(self.r, calls.shape[0]*calls.shape[1]),
+                'calls': calls.ravel()
+            })
+
+            result_df['puts'] = result_df['calls'] - self.S0 * np.exp(-result_df['q'] * result_df['T']) + result_df['K'] * np.exp(-result_df['r'] * result_df['T'])
+
+            return result_df
         else:
-            return K, call_prices, put_prices  # Shape (N, M)
+            return K, call_prices  # Shape (N, M)
