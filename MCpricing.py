@@ -163,3 +163,32 @@ class MCsim:
             self.stockpaths, self.returns =  Bates_dynamics(self.n_steps, self.n_paths, self.S0, r, q, self.T, params)
 
         return print('Simulation is finished')
+
+    def change_S0(self, S0):
+        self.stockpaths = S0 * np.cumprod(self.returns, axis=0)
+        self.stockpaths = np.insert(self.stockpaths, 0, S0, axis=0)
+
+    def down_barrier_price_batch(self, r, KT_df, H):
+        barrier_prices = KT_df.copy()
+        knock = np.min(self.stockpaths, axis=0) <= H
+        strikes_array = np.array(barrier_prices['K'])[:, np.newaxis]
+        ST_array = self.stockpaths[np.round(barrier_prices['T']*self.n_steps,0).astype('int')]
+        call_payoff = np.maximum(ST_array-strikes_array,0)
+        put_payoff = np.maximum(strikes_array-ST_array,0)
+        barrier_prices[f'DOBC_{H}'] = np.exp(-barrier_prices['T']*r)*np.mean(np.where(knock, 0, call_payoff), axis =1)
+        barrier_prices[f'DIBC_{H}'] = np.exp(-barrier_prices['T']*r)*np.mean(np.where(~knock, 0, call_payoff), axis =1)
+        barrier_prices[f'DOBP_{H}'] = np.exp(-barrier_prices['T']*r)*np.mean(np.where(knock, 0, put_payoff), axis =1)
+        barrier_prices[f'DIBP_{H}'] = np.exp(-barrier_prices['T']*r)*np.mean(np.where(~knock, 0, put_payoff), axis =1)
+        return barrier_prices
+    
+    def down_barrier_price_single(self, r, K, T, H):
+        barrier_prices = {}
+        knock = np.min(self.stockpaths, axis=0) <= H
+        ST_array = self.stockpaths[np.round(T*self.n_steps,0).astype('int')]
+        call_payoff = np.maximum(ST_array-K,0)
+        put_payoff = np.maximum(K-ST_array,0)
+        barrier_prices[f'DOBC_{H}'] = np.exp(-T*r)*np.mean(np.where(knock, 0, call_payoff))
+        barrier_prices[f'DIBC_{H}'] = np.exp(-T*r)*np.mean(np.where(~knock, 0, call_payoff))
+        barrier_prices[f'DOBP_{H}'] = np.exp(-T*r)*np.mean(np.where(knock, 0, put_payoff))
+        barrier_prices[f'DIBP_{H}'] = np.exp(-T*r)*np.mean(np.where(~knock, 0, put_payoff))
+        return barrier_prices
