@@ -61,7 +61,7 @@ def Heston_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
     Z_v = rho * Z + np.sqrt(1 - rho**2) * np.random.standard_normal((total_steps, n_paths))
 
     # Simulate volatility paths
-    v = np.zeros((n_steps + 1, n_paths))
+    v = np.zeros((total_steps + 1, n_paths))
     v[0] = v0
 
     if dismethod=='Euler':
@@ -102,7 +102,7 @@ def Bates_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
     Z_v = rho * Z + np.sqrt(1 - rho**2) * np.random.standard_normal((total_steps, n_paths))
 
     # Simulate volatility paths
-    v = np.zeros((n_steps + 1, n_paths))
+    v = np.zeros((total_steps + 1, n_paths))
     v[0] = v0
 
     if dismethod=='Euler':
@@ -162,4 +162,4 @@ class MCsim:
         if model == 'BSM':
             self.stockpaths, self.returns =  Bates_dynamics(self.n_steps, self.n_paths, self.S0, r, q, self.T, params)
 
-        return self.stockpaths, self.returns
+        return print('Simulation is finished')
