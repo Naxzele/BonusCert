@@ -1,4 +1,15 @@
 import numpy as np
+from scipy.interpolate import interp1d
+
+def make_rt(r, dt,T):
+    # r(t) component
+    maturities = np.arange(0,T+dt,dt)
+    r_interp = interp1d(r['T'], r['r'], kind='cubic', fill_value="extrapolate")
+    rt = r_interp(maturities)
+    rt = (rt[1:]*maturities[1:]-rt[:-1]*maturities[:-1])/(maturities[1:]-maturities[:-1])
+    rt = rt[:,np.newaxis]
+    return rt
+
 
 def BSdynamics(n_steps, n_paths, S0, r, q, T, params):
     dt = 1/n_steps
@@ -7,11 +18,14 @@ def BSdynamics(n_steps, n_paths, S0, r, q, T, params):
     t = np.linspace(0, T, n_steps + 1)  # [0, dt, 2dt, ..., T]
 
     total_steps = n_steps*T
+    # r(t) component
+    rt = make_rt(r, dt,T)
+
     # Generate random Brownian increments (Z ~ N(0, 1))
     Z = np.random.standard_normal((total_steps, n_paths))
 
     # Compute cumulative returns
-    drift = (r - q -0.5 * sigma**2) * dt
+    drift = (rt - q -0.5 * sigma**2) * dt
     diffusion = sigma * np.sqrt(dt)
     returns = np.exp(drift + diffusion * Z)
 
@@ -30,10 +44,13 @@ def Jump_dynamics(n_steps, n_paths, S0, r, q, T, params):
 
     dt = 1/n_steps
     total_steps = n_steps*T
+    # r(t) component
+    rt = make_rt(r, dt,T)
+
     Z = np.random.standard_normal((total_steps, n_paths))
     
     # BS part
-    drift = (r - q -0.5 * sigma**2) * dt
+    drift = (rt - q - lambda_ * (np.exp(mu_J + 0.5 * sigma_J**2) - 1) -0.5 * sigma**2) * dt
     diffusion = sigma * np.sqrt(dt)
 
     # Jump part
@@ -56,6 +73,9 @@ def Heston_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
 
     dt = 1/n_steps
     total_steps = n_steps*T
+    # r(t) component
+    rt = make_rt(r, dt,T)
+
     Z = np.random.standard_normal((total_steps, n_paths))
     # Generate correlated Brownian motions
     Z_v = rho * Z + np.sqrt(1 - rho**2) * np.random.standard_normal((total_steps, n_paths))
@@ -76,7 +96,7 @@ def Heston_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
 
     
     # Simulate S(t) with stochastic vol
-    returns = np.exp((r - q - 0.5 * v) * dt + np.sqrt(v * dt) * Z)
+    returns = np.exp((rt - q - 0.5 * v) * dt + np.sqrt(v * dt) * Z)
     stockpaths = S0 * np.cumprod(returns, axis=0)
     stockpaths = np.insert(stockpaths, 0, S0, axis=0)
     return stockpaths, returns
@@ -97,6 +117,10 @@ def Bates_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
 
     dt = 1/n_steps
     total_steps = n_steps*T
+
+    # r(t) component
+    rt = make_rt(r, dt,T)
+
     Z = np.random.standard_normal((total_steps, n_paths))
     # Generate correlated Brownian motions
     Z_v = rho * Z + np.sqrt(1 - rho**2) * np.random.standard_normal((total_steps, n_paths))
@@ -120,7 +144,7 @@ def Bates_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
     jump_sizes = np.exp(mu_J + sigma_J * np.random.standard_normal((total_steps, n_paths)))
 
     # Simulate S(t) with stochastic vol
-    returns = np.exp((r - q - 0.5 * v[:-1]) * dt + np.sqrt(v[:-1] * dt) * Z) * (1 + jump_shocks * (jump_sizes - 1))
+    returns = np.exp((rt - q - lambda_ * (np.exp(mu_J + 0.5 * sigma_J**2) - 1) - 0.5 * v[:-1]) * dt + np.sqrt(v[:-1] * dt) * Z) * (1 + jump_shocks * (jump_sizes - 1))
 
     stockpaths = S0 * np.cumprod(returns, axis=0)
     stockpaths = np.insert(stockpaths, 0, S0, axis=0)
@@ -145,7 +169,7 @@ class MCsim:
         self.T = T
         self.params = params
 
-    def simulate(self,r,q, model=None, dismethod=None, params=None):
+    def simulate(self, r , q, model=None, dismethod=None, params=None):
         if model is None:
             model = self.model
         if dismethod is None:
@@ -168,17 +192,39 @@ class MCsim:
         self.stockpaths = S0 * np.cumprod(self.returns, axis=0)
         self.stockpaths = np.insert(self.stockpaths, 0, S0, axis=0)
 
+
+    def vanilla_price_batch(self, r, KT_df, stockpaths):
+        vanilla_prices = KT_df.copy()
+
+        r_interp = interp1d(r['T'], r['r'], kind='cubic', fill_value="extrapolate")
+        vanilla_prices['r'] = r_interp(vanilla_prices['T'])
+
+        strikes_array = np.array(vanilla_prices['K'])[:, np.newaxis]
+        ST_array = stockpaths[np.round(vanilla_prices['T']*self.n_steps,0).astype('int')]
+
+        call_payoff = np.maximum(ST_array-strikes_array,0)
+        put_payoff = np.maximum(strikes_array-ST_array,0)
+
+        vanilla_prices['calls'] = np.exp(-vanilla_prices['T']*vanilla_prices['r'])*np.mean(call_payoff, axis =1)
+        vanilla_prices['puts'] = np.exp(-vanilla_prices['T']*vanilla_prices['r'])*np.mean(put_payoff, axis =1)
+
+        return vanilla_prices
+
     def down_barrier_price_batch(self, r, KT_df, H):
         barrier_prices = KT_df.copy()
+
+        r_interp = interp1d(r['T'], r['r'], kind='cubic', fill_value="extrapolate")
+        barrier_prices['r'] = r_interp(barrier_prices['T'])
+
         knock = np.min(self.stockpaths, axis=0) <= H
         strikes_array = np.array(barrier_prices['K'])[:, np.newaxis]
         ST_array = self.stockpaths[np.round(barrier_prices['T']*self.n_steps,0).astype('int')]
         call_payoff = np.maximum(ST_array-strikes_array,0)
         put_payoff = np.maximum(strikes_array-ST_array,0)
-        barrier_prices[f'DOBC_{H}'] = np.exp(-barrier_prices['T']*r)*np.mean(np.where(knock, 0, call_payoff), axis =1)
-        barrier_prices[f'DIBC_{H}'] = np.exp(-barrier_prices['T']*r)*np.mean(np.where(~knock, 0, call_payoff), axis =1)
-        barrier_prices[f'DOBP_{H}'] = np.exp(-barrier_prices['T']*r)*np.mean(np.where(knock, 0, put_payoff), axis =1)
-        barrier_prices[f'DIBP_{H}'] = np.exp(-barrier_prices['T']*r)*np.mean(np.where(~knock, 0, put_payoff), axis =1)
+        barrier_prices[f'DOBC_{H}'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(knock, 0, call_payoff), axis =1)
+        barrier_prices[f'DIBC_{H}'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(~knock, 0, call_payoff), axis =1)
+        barrier_prices[f'DOBP_{H}'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(knock, 0, put_payoff), axis =1)
+        barrier_prices[f'DIBP_{H}'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(~knock, 0, put_payoff), axis =1)
         return barrier_prices
     
     def down_barrier_price_single(self, r, K, T, H):

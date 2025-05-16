@@ -137,7 +137,7 @@ class ModelCalibrator:
         self.keys_calls = calls_data['K'].round(3).astype(str) + "_" + calls_data['T'].round(6).astype(str)
         self.keys_puts = puts_data['K'].round(3).astype(str) + "_" + puts_data['T'].round(6).astype(str)
 
-        self.r_interp = interp1d(r_term['T'], r_term['r'], kind='linear', fill_value="extrapolate")
+        self.r_interp = interp1d(r_term['T'], r_term['r'], kind='cubic', fill_value="extrapolate")
         self.r = self.r_interp(self.T)
         self.q_interp = interp1d(q_term['T'], q_term['q'], kind='linear', fill_value="extrapolate")
         self.q = self.q_interp(self.T)
