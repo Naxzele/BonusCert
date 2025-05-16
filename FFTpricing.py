@@ -49,13 +49,13 @@ def bates_characteristic_fn(u, S0, r, q, T, params):
     g = (kappa - rho * sigma_v * i * u - d) / (kappa - rho * sigma_v * i * u + d)
 
     exp_dt = np.exp(-d * T)
-    G = g * exp_dt
-    C = (r - q) * i * u * T + lambda_ * T * (np.exp(i * u * mu_J - 0.5 * sigma_J**2 * u**2) - 1)
-    C += theta * kappa / (sigma_v**2) * ((kappa - rho * sigma_v * i * u - d) * T - 2 * np.log((1 - G) / (1 - g)))
+    
+    term_1 = i*u*(np.log(S0)+(r-q)*T)
+    term_2 = theta*kappa*sigma_v**(-2)*(T*(kappa-rho*sigma_v*i*u - d) - 2*np.log((1 - g*exp_dt)/(1 - g)))
+    term_3 = v0*sigma_v**(-2)*(kappa-rho*sigma_v*i*u - d)*(1-exp_dt)/(1-g*exp_dt)
+    term_4 = -lambda_*mu_J*i*u*T + lambda_*T*((1+mu_J)**(i*u)*np.exp(sigma_J**2*(i*u/2)*(i*u-1))-1)
 
-    D = (kappa - rho * sigma_v * i * u - d) / (sigma_v**2) * ((1 - exp_dt) / (1 - G))
-
-    return np.exp(C + D * v0 + i * u * np.log(S0))
+    return np.exp(term_1 + term_2 + term_3 + term_4)
 
 class fft_price:
     def __init__(self, char_fn, S0, r, q, T, params):
@@ -70,7 +70,7 @@ class fft_price:
         if char_fn == 'BATES':
             self.char_fn = lambda u: bates_characteristic_fn(u, S0, self.r, self.q, self.T, params)
 
-    def prices(self, strike, alpha=1.5, N=4096, eta=0.25):
+    def prices(self, strike, alpha=1.5, N=2**12, eta=0.25):
         lambd = 2 * np.pi / (N * eta)
         b = 0.5 * N * lambd
         k = -b + lambd * np.arange(N)  # shape (N,)
@@ -132,16 +132,15 @@ class ModelCalibrator:
         # Extract market data
         self.strikes = np.unique(np.concatenate((calls_data['K'].unique(),puts_data['K'].unique())))
         self.T = np.unique(np.concatenate((calls_data['T'].unique(),puts_data['T'].unique())))
-        self.market_calls = calls_data.sort_values(['K','T'])['calls'].values
-        self.market_puts = puts_data.sort_values(['K','T'])['puts'].values
+        self.market = np.concatenate([calls_data.sort_values(['K','T'])['calls'].values,puts_data.sort_values(['K','T'])['puts'].values])
 
         self.keys_calls = calls_data['K'].round(3).astype(str) + "_" + calls_data['T'].round(6).astype(str)
         self.keys_puts = puts_data['K'].round(3).astype(str) + "_" + puts_data['T'].round(6).astype(str)
 
-        r_interp = interp1d(r_term['T'], r_term['r'], kind='linear', fill_value="extrapolate")
-        self.r = r_interp(self.T)
-        q_interp = interp1d(q_term['T'], q_term['q'], kind='linear', fill_value="extrapolate")
-        self.q = q_interp(self.T)
+        self.r_interp = interp1d(r_term['T'], r_term['r'], kind='linear', fill_value="extrapolate")
+        self.r = self.r_interp(self.T)
+        self.q_interp = interp1d(q_term['T'], q_term['q'], kind='linear', fill_value="extrapolate")
+        self.q = self.q_interp(self.T)
         
     def set_initial_params(self, params):
         """Set or change parameter values for calibration"""
@@ -159,32 +158,31 @@ class ModelCalibrator:
     #     """Create price calculator instance with current parameters"""
     #     return fft_price(self.model_type, S0, r, q, T, params)
         
-    def calculate_prices(self, S0=None, r=None, q=None, T=None, strike=None, params=None):
+    def calculate_prices(self, S0=None, calls_data=None, puts_data=None, params=None,  N=2**12, eta=0.25):
         """
         Calculate option prices using current parameters
         """
         if S0 is None:
             S0 = self.S0
-        
-        if r is None:
-            r = self.r
 
-        if q is None:
-            q = self.q
-
-        if T is None:
-            T = self.T
-
-        if strike is None:
+        if (calls_data is not None) and (puts_data is not None):
+            strike = np.unique(np.concatenate((calls_data['K'].unique(),puts_data['K'].unique())))
+            T = np.unique(np.concatenate((calls_data['T'].unique(),puts_data['T'].unique())))
+            r = self.r_interp(T)
+            q = self.q_interp(T)
+        else:
             strike = self.strikes
-
+            T = self.T
+            r = self.r
+            q = self.q
+            
         if params is None:
             params = self.params
             
         calculator = fft_price(self.model_type, S0, r, q, T, params)
-        return calculator.prices(strike)
+        return calculator.prices(strike, N=N, eta=eta)
 
-    def error_function(self, params_dict=None, weights=None):
+    def error_function(self, params_dict=None, weights=None, loss = 'MSE', epsilon = 1e-6,  N=2**12, eta=0.25):
         """
         Calculate error between model and market prices
         """
@@ -203,22 +201,36 @@ class ModelCalibrator:
         
         # Calculate model prices
         calculator = fft_price(self.model_type, self.S0, self.r, self.q, self.T, params_dict)
-        model_prices = calculator.prices(self.strikes)
+        model_prices = calculator.prices(self.strikes, N=N, eta=eta)
         model_prices['key'] = model_prices['K'].round(3).astype(str) + "_" + model_prices['T'].round(6).astype(str)
+        predicted = np.concatenate([model_prices[model_prices['key'].isin(self.keys_calls)]['calls'].values,
+                                    model_prices[model_prices['key'].isin(self.keys_puts)]['puts'].values])
+
+        if loss == 'MSE':
+            errors =  (predicted - self.market)**2
+            if weights is not None:
+                errors = errors * weights             
+            return np.mean(errors)
         
-        # Calculate errors
-        call_errors = model_prices[model_prices['key'].isin(self.keys_calls)]['calls'].values - self.market_calls
-        put_errors = model_prices[model_prices['key'].isin(self.keys_puts)]['puts'].values - self.market_puts
+        if loss == 'WRSE':
+            errors =  (predicted - self.market)**2/(self.market+epsilon)**2
+            if weights is not None:
+                errors = errors * weights
+            return np.mean(errors)
         
-        # Combine errors
-        total_errors = np.concatenate([call_errors, put_errors])
+        if loss == 'LRMSE':
+            errors =  (np.log(np.maximum(predicted+epsilon,epsilon)) - np.log(np.maximum(self.market+epsilon,epsilon)))**2
+            if weights is not None:
+                errors = errors * weights
+            return np.mean(errors)
         
-        if weights is not None:
-            total_errors = total_errors * weights
-            
-        return np.mean(total_errors**2)
+        if loss == 'NMAPE':
+            errors =  np.abs(predicted - self.market)/(np.abs(predicted) + np.abs(self.market) + epsilon)
+            if weights is not None:
+                errors = errors * weights
+            return np.mean(errors)
         
-    def calibrate(self, positive_bounds ,weights=None, method='L-BFGS-B', options=None):
+    def calibrate(self, positive_bounds ,weights=None, loss='MSE', epsilon=1e-6,  N=2**12, eta=0.25, method='L-BFGS-B', options=None):
         """
         Calibrate model parameters to market data with proper sign handling
         """
@@ -258,7 +270,7 @@ class ModelCalibrator:
                     params_dict[name] = np.exp(x[i])  # Transform back
                 else:
                     params_dict[name] = x[i]
-            return self.error_function(params_dict, weights)
+            return self.error_function(params_dict, weights, loss, epsilon,  N, eta)
             
         # Run optimization
         result = minimize(objective, 
