@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.interpolate import interp1d
+from scipy.optimize import minimize
 
 def make_rt(r, dt,T):
     # r(t) component
@@ -27,12 +28,12 @@ def BSdynamics(n_steps, n_paths, S0, r, q, T, params):
     # Compute cumulative returns
     drift = (rt - q -0.5 * sigma**2) * dt
     diffusion = sigma * np.sqrt(dt)
-    returns = np.exp(drift + diffusion * Z)
+    logreturn = drift + diffusion * Z
 
     # Compute paths: S(t) = S0 * cumulative product of returns
-    stockpaths = S0 * np.cumprod(returns, axis=0)
+    stockpaths = S0 * np.exp(np.cumsum(logreturn, axis=0))
     stockpaths = np.insert(stockpaths, 0, S0, axis=0)
-    return stockpaths, returns
+    return stockpaths, logreturn
 
 def Jump_dynamics(n_steps, n_paths, S0, r, q, T, params):
     # Jump parameters
@@ -55,13 +56,13 @@ def Jump_dynamics(n_steps, n_paths, S0, r, q, T, params):
 
     # Jump part
     jump_shocks = np.random.poisson(lambda_ * dt, (total_steps, n_paths))
-    jump_sizes = np.exp(mu_J + sigma_J * np.random.standard_normal((total_steps, n_paths)))
+    jump_sizes = mu_J + sigma_J * np.random.standard_normal((total_steps, n_paths))
 
     # Combine diffusion and jumps
-    returns = np.exp(drift + diffusion * Z) * (1 + jump_shocks * (jump_sizes - 1))
-    stockpaths = S0 * np.cumprod(returns, axis=0)
+    logreturn = drift + diffusion * Z + jump_shocks * jump_sizes 
+    stockpaths = S0 * np.exp(np.cumsum(logreturn, axis=0))
     stockpaths = np.insert(stockpaths, 0, S0, axis=0)
-    return stockpaths, returns
+    return stockpaths, logreturn
 
 def Heston_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
     # Heston parameters
@@ -96,10 +97,10 @@ def Heston_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
 
     
     # Simulate S(t) with stochastic vol
-    returns = np.exp((rt - q - 0.5 * v) * dt + np.sqrt(v * dt) * Z)
-    stockpaths = S0 * np.cumprod(returns, axis=0)
+    logreturn = (rt - q - 0.5 * v) * dt + np.sqrt(v * dt) * Z
+    stockpaths = S0 * np.exp(np.cumsum(logreturn, axis=0))
     stockpaths = np.insert(stockpaths, 0, S0, axis=0)
-    return stockpaths, returns
+    return stockpaths, logreturn
 
 def Bates_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
     # Heston parameters
@@ -144,17 +145,16 @@ def Bates_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
     jump_shocks = np.random.poisson(lambda_ * dt, (total_steps, n_paths))
     
     log_jump = mu_J + sigma_J * np.random.standard_normal((total_steps, n_paths))
-    # jump_sizes = np.exp(mu_J + sigma_J * np.random.standard_normal((total_steps, n_paths)))
-
-    logreturn = (rt - q - jump_drift - 0.5 * v[:-1]) * dt + np.sqrt(v[:-1] * dt) * Z + jump_shocks*log_jump
-    stockpaths = S0 * np.exp(np.cumsum(logreturn, axis=0))
+    returns = (rt - q - jump_drift - 0.5 * v[:-1]) * dt + np.sqrt(v[:-1] * dt) * Z + jump_shocks*log_jump
+    stockpaths = S0 * np.exp(np.cumsum(returns, axis=0))
 
     # Simulate S(t) with stochastic vol
+    # jump_sizes = np.exp(mu_J + sigma_J * np.random.standard_normal((total_steps, n_paths)))
     # returns = np.exp((rt - q - jump_drift - 0.5 * v[:-1]) * dt + np.sqrt(v[:-1] * dt) * Z) * (1 + jump_shocks * (jump_sizes - 1))
 
     # stockpaths = S0 * np.cumprod(returns, axis=0)
     stockpaths = np.insert(stockpaths, 0, S0, axis=0)
-    return stockpaths, logreturn
+    return stockpaths, returns
                 
                 
 class MCsim:
@@ -193,6 +193,10 @@ class MCsim:
             self.stockpaths, self.returns =  Bates_dynamics(self.n_steps, self.n_paths, self.S0, r, q, self.T, params)
 
         return print('Simulation is finished')
+    
+    def load_paths(self, stockpaths):
+        self.stockpaths = stockpaths
+        self.returns = np.diff(np.log(stockpaths),axis=0)
 
     def change_S0(self, S0):
         self.stockpaths = S0 * np.exp(np.cumsum(self.returns, axis=0))
@@ -218,6 +222,7 @@ class MCsim:
 
     def down_barrier_price_batch(self, r, KT_df, H):
         barrier_prices = KT_df.copy()
+        barrier_prices['H'] = H
 
         r_interp = interp1d(r['T'], r['r'], kind='cubic', fill_value="extrapolate")
         barrier_prices['r'] = r_interp(barrier_prices['T'])
@@ -227,10 +232,10 @@ class MCsim:
         ST_array = self.stockpaths[np.round(barrier_prices['T']*self.n_steps,0).astype('int')]
         call_payoff = np.maximum(ST_array-strikes_array,0)
         put_payoff = np.maximum(strikes_array-ST_array,0)
-        barrier_prices[f'DOBC_{H}'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(knock, 0, call_payoff), axis =1)
-        barrier_prices[f'DIBC_{H}'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(~knock, 0, call_payoff), axis =1)
-        barrier_prices[f'DOBP_{H}'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(knock, 0, put_payoff), axis =1)
-        barrier_prices[f'DIBP_{H}'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(~knock, 0, put_payoff), axis =1)
+        barrier_prices[f'DOBC'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(knock, 0, call_payoff), axis =1)
+        barrier_prices[f'DIBC'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(~knock, 0, call_payoff), axis =1)
+        barrier_prices[f'DOBP'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(knock, 0, put_payoff), axis =1)
+        barrier_prices[f'DIBP'] = np.exp(-barrier_prices['T']*barrier_prices['r'])*np.mean(np.where(~knock, 0, put_payoff), axis =1)
         return barrier_prices
     
     def down_barrier_price_single(self, r, K, T, H):
@@ -244,3 +249,43 @@ class MCsim:
         barrier_prices[f'DOBP_{H}'] = np.exp(-T*r)*np.mean(np.where(knock, 0, put_payoff))
         barrier_prices[f'DIBP_{H}'] = np.exp(-T*r)*np.mean(np.where(~knock, 0, put_payoff))
         return barrier_prices
+    
+    def DOBP(self, r, K, T, H):
+        knock = np.min(self.stockpaths, axis=0) <= H
+        ST_array = self.stockpaths[np.round(T*self.n_steps,0).astype('int')]
+        put_payoff = np.maximum(K-ST_array,0)
+        DOBP = np.exp(-T*r)*np.mean(np.where(knock, 0, put_payoff))
+        return DOBP
+    
+    def best_HKT_barrier(self, S0, r, HKT, bounds=[(0.001,0.99),(0.001,0.99), (1,1)], w =[1,1] ,  method='L-BFGS-B', options=None):
+        r_interp = interp1d(r['T'],r['r'], kind='cubic', fill_value="extrapolate")
+
+        if options is None:
+            options = {'maxiter': 1000, 'ftol': 1e-8}
+        
+        initial_values = np.array(HKT)
+
+        def objective(x):
+            H_frac, K_frac, T = x
+            K = np.floor(K_frac*S0)
+            H = np.floor(H_frac*K)
+            knock = np.min(self.stockpaths, axis=0) <= H
+            barrier_price = self.DOBP(r_interp(T), K, T, H)
+            return w[0]*np.sum(knock)/len(knock) + w[1]*barrier_price
+        
+        result = minimize(objective, 
+                        initial_values, 
+                        method=method,
+                        bounds=bounds,
+                        constraints=None,
+                        options=options)
+        
+        return result
+        
+
+        
+
+        
+
+        
+
