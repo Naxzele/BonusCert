@@ -137,18 +137,24 @@ def Bates_dynamics(n_steps, n_paths, S0, r, q, T, params, dismethod):
     if dismethod=='Milstein':
         for t in range(1, total_steps):
             v[t] = np.maximum(v[t-1] + kappa * (theta - v[t-1]) * dt + 
-                sigma_v * np.sqrt(v[t-1] * dt) * Z_v[t-1] + sigma_v**2*dt/4*(Z_v[t-1]**2-1), 0) 
+                sigma_v * np.sqrt(v[t-1] * dt)   * Z_v[t-1] + sigma_v**2*dt/4*(Z_v[t-1]**2-1), 0) 
         
     # Jump part
+    jump_drift = lambda_ * (np.exp(mu_J + 0.5 * sigma_J**2) - 1)
     jump_shocks = np.random.poisson(lambda_ * dt, (total_steps, n_paths))
-    jump_sizes = np.exp(mu_J + sigma_J * np.random.standard_normal((total_steps, n_paths)))
+    
+    log_jump = mu_J + sigma_J * np.random.standard_normal((total_steps, n_paths))
+    # jump_sizes = np.exp(mu_J + sigma_J * np.random.standard_normal((total_steps, n_paths)))
+
+    logreturn = (rt - q - jump_drift - 0.5 * v[:-1]) * dt + np.sqrt(v[:-1] * dt) * Z + jump_shocks*log_jump
+    stockpaths = S0 * np.exp(np.cumsum(logreturn, axis=0))
 
     # Simulate S(t) with stochastic vol
-    returns = np.exp((rt - q - lambda_ * (np.exp(mu_J + 0.5 * sigma_J**2) - 1) - 0.5 * v[:-1]) * dt + np.sqrt(v[:-1] * dt) * Z) * (1 + jump_shocks * (jump_sizes - 1))
+    # returns = np.exp((rt - q - jump_drift - 0.5 * v[:-1]) * dt + np.sqrt(v[:-1] * dt) * Z) * (1 + jump_shocks * (jump_sizes - 1))
 
-    stockpaths = S0 * np.cumprod(returns, axis=0)
+    # stockpaths = S0 * np.cumprod(returns, axis=0)
     stockpaths = np.insert(stockpaths, 0, S0, axis=0)
-    return stockpaths, returns
+    return stockpaths, logreturn
                 
                 
 class MCsim:
@@ -189,7 +195,7 @@ class MCsim:
         return print('Simulation is finished')
 
     def change_S0(self, S0):
-        self.stockpaths = S0 * np.cumprod(self.returns, axis=0)
+        self.stockpaths = S0 * np.exp(np.cumsum(self.returns, axis=0))
         self.stockpaths = np.insert(self.stockpaths, 0, S0, axis=0)
 
 
